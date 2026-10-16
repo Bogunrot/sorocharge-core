@@ -234,6 +234,17 @@ mod tests {
         assert_eq!(result, Err(SorochargeError::ExpectedTransferMissing));
     }
 
+    /// A simulation that emitted nothing at all is the one missing-transfer
+    /// input the fixture-based test above cannot construct: it must surface
+    /// as `ExpectedTransferMissing`, not as a malformed or unexpected event.
+    #[test]
+    fn rejects_a_simulation_with_no_events_at_all() {
+        let f = load();
+        let (asset, payer, recipient, amount) = expected(&f);
+        let result = verify_transfer_effects(&[], &asset, &payer, &recipient, amount);
+        assert_eq!(result, Err(SorochargeError::ExpectedTransferMissing));
+    }
+
     #[test]
     fn rejects_a_second_transfer_event() {
         let f = load();
