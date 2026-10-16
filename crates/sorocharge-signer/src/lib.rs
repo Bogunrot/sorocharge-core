@@ -24,7 +24,9 @@ mod sign;
 mod verify;
 
 pub use effects::verify_transfer_effects;
-pub use entry::{build_charge_entry, Address, ChargeParams, CredentialKind, UnsignedEntry};
+pub use entry::{
+    build_charge_entry, parse_address, Address, ChargeParams, CredentialKind, UnsignedEntry,
+};
 pub use error::SorochargeError;
 pub use sign::{network_id_hash, sign_entry, SignedEntry, Signer};
-pub use verify::verify_entry;
+pub use verify::{verify_delegated_threshold, verify_entry};
