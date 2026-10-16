@@ -66,6 +66,17 @@ across an `.await` inside an async HTTP handler.
 
 ## Functions
 
+### `parse_address`
+
+```rust
+pub fn parse_address(strkey: &str) -> Result<Address, SorochargeError>;
+```
+
+Decodes a SEP-23 strkey (`G...`, `C...`, `M...`) into an `Address`. Any decode
+failure — bad length, broken checksum, or a well-formed strkey of a type that is not
+an address — becomes `InvalidAddress` carrying the offending string, so JSON-facing
+callers get this library's own actionable variant instead of a bare parse error.
+
 ### `build_charge_entry`
 
 ```rust
@@ -124,11 +135,35 @@ Fails closed, in this order:
 4. **`AssetMismatch`**
 5. **`PayerMismatch`** — the authorizing address (which must also be the invocation's
    `from`) doesn't match `expected.payer`.
-6. **`AmountMismatch`**
-7. **`RecipientMismatch`**
-8. **`InvalidSignature`** — no signable node carries a valid ed25519 signature over the
+6. **`AmountNonPositive`** — either side's amount is zero or negative; a SEP-41
+   transfer must move a positive amount. Checked before `AmountMismatch` so a
+   non-positive amount reports itself instead of masquerading as a mismatch.
+7. **`AmountMismatch`**
+8. **`RecipientMismatch`**
+9. **`InvalidSignature`** — no signable node carries a valid ed25519 signature over the
    reconstructed preimage. For `Delegated`, this proves at least one attached signature is
    genuine; it cannot know the target account's own multisig/threshold policy.
+
+### `verify_delegated_threshold`
+
+```rust
+pub fn verify_delegated_threshold(
+    entry: &SignedEntry,
+    _expected: &ChargeParams,
+    _current_ledger: u32,
+    network_passphrase: &str,
+    signers_with_weights: &[(Address, u32)],
+    threshold: u32,
+) -> Result<(), SorochargeError>;
+```
+
+Checks that the valid signatures attached to a `Delegated` entry's signable nodes meet
+the account's actual threshold policy — stricter than `verify_entry`, which only proves
+at least one attached signature is genuine. `_expected` and `_current_ledger` are
+accepted for signature symmetry with `verify_entry` and are not consulted yet. Unused
+by the x402 and MPP adapters today (x402 forbids `AddressWithDelegates`; MPP accepts
+only legacy `Address` credentials for pull mode); it exists for direct
+`sorocharge-signer` callers using `Delegated` credentials.
 
 ### `verify_transfer_effects`
 
@@ -163,6 +198,7 @@ transaction — not the CAP text, which the host doesn't always match exactly.
 | `ExpirationExceedsAllowance { signature_expiration_ledger, allowed_until_ledger }` | Valid longer than the caller allowed. |
 | `UnexpectedInvocationShape` | Not a bare SEP-41 transfer. |
 | `AssetMismatch` / `PayerMismatch` / `AmountMismatch` / `RecipientMismatch` | Field doesn't match. |
+| `AmountNonPositive` | The amount is zero or negative — invalid for a SEP-41 transfer. |
 | `InvalidSignature` | No genuine signature found. |
 | `NoMatchingCredentialNode` | A signer's address matches no node in the entry being signed. |
 | `SimulationEventsMalformed { reason }` | An event didn't decode, or lacks expected topics/data. |

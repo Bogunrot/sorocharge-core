@@ -14,6 +14,32 @@ use crate::error::SorochargeError;
 /// in a shape the reference SDKs don't also produce.
 pub type Address = ScAddress;
 
+/// Decodes a SEP-23 strkey (`G...` account, `C...` contract, `M...` muxed
+/// account) into an [`Address`].
+///
+/// The protocol adapters this library serves receive addresses as JSON
+/// strings, while every structure built, signed, and verified here carries
+/// an `ScAddress`. `str.parse::<Address>()` already rejects anything that
+/// isn't a decodable address — this wrapper exists so that failure is
+/// reported as [`SorochargeError::InvalidAddress`] carrying the offending
+/// string, the one variant a caller can act on ("this input was never an
+/// address") rather than a generic parse error, per the constraint that
+/// every public error variant is distinct enough to act on differently.
+///
+/// # Errors
+///
+/// Returns [`SorochargeError::InvalidAddress`] with `strkey` set to the
+/// input string whenever it fails to decode into an [`ScAddress`]: bad
+/// length, bad base32, a broken checksum, or a well-formed strkey of a
+/// type that is not an address (e.g. a secret key).
+pub fn parse_address(strkey: &str) -> Result<Address, SorochargeError> {
+    strkey
+        .parse::<Address>()
+        .map_err(|_| SorochargeError::InvalidAddress {
+            strkey: strkey.to_owned(),
+        })
+}
+
 /// The parameters of a single SEP-41 transfer this library will build, sign,
 /// or verify an authorization entry for.
 ///
@@ -806,5 +832,38 @@ mod golden_vector_tests {
     #[test]
     fn amount_i128_max_round_trips_unchanged_through_build_sign_and_verify() {
         assert_amount_round_trips_unchanged(i128::MAX);
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    /// A real account strkey with its final character swapped, which breaks
+    /// only the CRC16 checksum: the input is still 56 base32 characters
+    /// shaped like a `G...` address, but it must fail to decode into an
+    /// `ScAddress`. The failure has to surface as exactly
+    /// `Err(SorochargeError::InvalidAddress)` carrying the original string —
+    /// the assertion compares the whole `Result`, so returning any other
+    /// variant fails the test with a readable diff instead of passing.
+    #[test]
+    fn strkey_that_fails_to_decode_returns_invalid_address() {
+        let strkey = "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64M";
+
+        // Guard the fixture itself: the test proves nothing if this string
+        // ever starts decoding into an ScAddress.
+        assert!(
+            strkey.parse::<Address>().is_err(),
+            "fixture must be a strkey that fails to decode into an ScAddress"
+        );
+
+        let result = parse_address(strkey);
+
+        assert_eq!(
+            result,
+            Err(SorochargeError::InvalidAddress {
+                strkey: strkey.to_owned(),
+            })
+        );
     }
 }
