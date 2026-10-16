@@ -534,16 +534,20 @@ mod tests {
         )]
     }
 
-    /// The submitted transaction's XDR must decode: garbage base64 (and
-    /// valid base64 that is not XDR) surfaces as `XdrDecodingFailed`, not
-    /// any other variant.
+    /// A payment naming a CAIP-2 network identifier with no mapping on this
+    /// facilitator must fail as `UnsupportedNetwork`, carrying the offending
+    /// identifier back — not as a generic payload or signature error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rejects_a_payment_transaction_whose_xdr_does_not_decode() {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-
+    async fn rejects_a_network_identifier_with_no_caip2_mapping() {
         let facilitator_signer = TestSigner::from_seed([0x22; 32]);
         let payer = TestSigner::from_seed([0x33; 32]);
         let params = charge_params(&payer.address());
+        let mut request = request_for(&params, &payer);
+        // Keep the payload and the requirements consistent with each other so
+        // the failure is the unknown CAIP-2 identifier itself, not a
+        // payload/requirements mismatch.
+        request.payment_requirements.network = "stellar:bogus".to_string();
+        request.payment_payload.accepted.network = "stellar:bogus".to_string();
 
         let rpc = MockRpc::spawn(CURRENT_LEDGER, ACCOUNT_SEQ_NUM, 100, events_for(&params)).await;
         let rpc_client = stellar_rpc_client::Client::new(&rpc.url).expect("rpc client");
@@ -554,22 +558,50 @@ mod tests {
             FacilitatorConfig::default(),
         );
 
-        // Not base64 at all.
-        let mut request = request_for(&params, &payer);
-        request.payment_payload.payload.transaction = "!!!not-valid-base64!!!".to_string();
-        let result = facilitator.validate(&request).await;
+        match facilitator.validate(&request).await {
+            Err(X402Error::UnsupportedNetwork { network }) => {
+                assert_eq!(network, "stellar:bogus");
+            }
+            other => panic!("expected UnsupportedNetwork, got {other:?}"),
+        }
         assert!(
-            matches!(result, Err(X402Error::XdrDecodingFailed { .. })),
-            "expected XdrDecodingFailed for a non-base64 transaction, got {result:?}"
+            rpc.methods().is_empty(),
+            "an unknown network must fail before any RPC call"
+        );
+    }
+
+    /// A verify request whose payload does not have the expected shape (here:
+    /// a non-`exact` scheme) must fail as exactly `InvalidPaymentPayload`,
+    /// carrying the reason back — not as any other `X402Error` variant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_a_malformed_payload_as_invalid_payment_payload() {
+        let facilitator_signer = TestSigner::from_seed([0x22; 32]);
+        let payer = TestSigner::from_seed([0x33; 32]);
+        let params = charge_params(&payer.address());
+        let mut request = request_for(&params, &payer);
+        request.payment_payload.accepted.scheme = "upfront".to_string();
+
+        let rpc = MockRpc::spawn(CURRENT_LEDGER, ACCOUNT_SEQ_NUM, 100, events_for(&params)).await;
+        let rpc_client = stellar_rpc_client::Client::new(&rpc.url).expect("rpc client");
+        let facilitator = Facilitator::new(
+            &rpc_client,
+            &facilitator_signer,
+            NETWORK.to_string(),
+            FacilitatorConfig::default(),
         );
 
-        // Valid base64, but not a TransactionEnvelope.
-        let mut request = request_for(&params, &payer);
-        request.payment_payload.payload.transaction = BASE64.encode(b"this is not XDR");
-        let result = facilitator.validate(&request).await;
+        match facilitator.validate(&request).await {
+            Err(X402Error::InvalidPaymentPayload { reason }) => {
+                assert!(
+                    reason.contains("exact"),
+                    "expected the scheme-shape reason, got {reason:?}"
+                );
+            }
+            other => panic!("expected InvalidPaymentPayload, got {other:?}"),
+        }
         assert!(
-            matches!(result, Err(X402Error::XdrDecodingFailed { .. })),
-            "expected XdrDecodingFailed for non-XDR bytes, got {result:?}"
+            rpc.methods().is_empty(),
+            "a malformed payload must fail before any RPC call"
         );
     }
 
