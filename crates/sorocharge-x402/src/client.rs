@@ -20,7 +20,12 @@ pub const PAYMENT_SIGNATURE_HEADER: &str = "PAYMENT-SIGNATURE";
 /// `maxTimeoutSeconds` into a ledger count when the live network estimate
 /// isn't available. Matches the spec's own fallback.
 const DEFAULT_ESTIMATED_LEDGER_SECONDS: u64 = 5;
-
+/// Safety margin: the x402 client halves the spec's maxTimeoutSeconds
+/// allowance, matching the MPP client's approach. If ledgers close
+/// slower than the 5s default, a full-allowance expiry can fail the
+/// facilitator's own ExpirationExceedsAllowance check (a failure mode
+/// already observed live on testnet). The margin keeps the expiry inside
+/// the bound at the cost of a shorter authorization window.
 fn decode_header_json<T: serde::de::DeserializeOwned>(header_value: &str) -> Result<T, String> {
     let bytes = BASE64
         .decode(header_value.trim())
@@ -176,7 +181,8 @@ impl X402Client {
 
         let ledger_timeout = requirements
             .max_timeout_seconds
-            .div_ceil(DEFAULT_ESTIMATED_LEDGER_SECONDS);
+            .div_ceil(DEFAULT_ESTIMATED_LEDGER_SECONDS)
+            .div_ceil(2);
         params.valid_until_ledger =
             current_ledger.saturating_add(u32::try_from(ledger_timeout).unwrap_or(u32::MAX));
 
@@ -217,5 +223,184 @@ impl X402Client {
             });
         }
         Ok(second)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use stellar_xdr::{
+        HostFunction, MuxedAccount, OperationBody, ReadXdr, SorobanCredentials,
+        TransactionEnvelope, Uint256,
+    };
+
+    use crate::test_util::{MockResource, TestSigner};
+    use crate::types::{ResourceInfo, StellarExtra};
+
+    const NETWORK: &str = "Test SDF Network ; September 2015";
+    const ASSET: &str = "CAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGGJH";
+    const PAY_TO: &str = "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N";
+
+    fn payment_required(network: &str) -> PaymentRequired {
+        PaymentRequired {
+            x402_version: 2,
+            error: None,
+            resource: ResourceInfo {
+                url: "http://127.0.0.1/resource".to_string(),
+                description: None,
+                mime_type: None,
+            },
+            accepts: vec![PaymentRequirements {
+                scheme: "exact".to_string(),
+                network: network.to_string(),
+                amount: "42000000".to_string(),
+                asset: ASSET.to_string(),
+                pay_to: PAY_TO.to_string(),
+                max_timeout_seconds: 60,
+                extra: StellarExtra {
+                    are_fees_sponsored: true,
+                },
+            }],
+            extensions: serde_json::Map::new(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn returns_200_and_retries_with_a_payment_signature() {
+        let resource = MockResource::spawn(payment_required("stellar:testnet")).await;
+        let client = X402Client::new(Duration::from_secs(5)).expect("client");
+        let signer = TestSigner::from_seed([0x55; 32]);
+
+        let response = client
+            .get_with_payment(&resource.url, &signer, NETWORK, 1_000)
+            .await
+            .expect("payment flow");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(resource.request_count(), 2);
+
+        let signature = resource.captured_signature();
+        let bytes = BASE64
+            .decode(signature.trim())
+            .expect("base64-decode the header");
+        let payload: PaymentPayload = serde_json::from_slice(&bytes).expect("decode the payload");
+        assert_eq!(payload.x402_version, 2);
+        assert_eq!(payload.accepted.network, "stellar:testnet");
+        assert_eq!(payload.accepted.amount, "42000000");
+
+        let envelope =
+            TransactionEnvelope::from_xdr_base64(&payload.payload.transaction, Limits::none())
+                .expect("decode the payment envelope");
+        let TransactionEnvelope::Tx(v1) = envelope else {
+            panic!("expected a v1 envelope");
+        };
+        assert_eq!(
+            v1.tx.source_account,
+            MuxedAccount::Ed25519(Uint256([0u8; 32]))
+        );
+        let [operation] = v1.tx.operations.as_slice() else {
+            panic!("expected exactly one operation");
+        };
+        let OperationBody::InvokeHostFunction(invoke) = &operation.body else {
+            panic!("expected an invokeHostFunction operation");
+        };
+        assert!(matches!(
+            invoke.host_function,
+            HostFunction::InvokeContract(_)
+        ));
+        let [auth_entry] = invoke.auth.as_slice() else {
+            panic!("expected exactly one authorization entry");
+        };
+        assert!(matches!(
+            auth_entry.credentials,
+            SorobanCredentials::Address(_)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_a_payment_required_header_that_does_not_decode() {
+        async fn handler(
+            axum::extract::State(value): axum::extract::State<String>,
+        ) -> axum::response::Response {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                super::PAYMENT_REQUIRED_HEADER,
+                axum::http::HeaderValue::from_str(&value).expect("header value"),
+            );
+            axum::response::IntoResponse::into_response((
+                axum::http::StatusCode::PAYMENT_REQUIRED,
+                headers,
+            ))
+        }
+
+        async fn spawn_with_header(value: &str) -> String {
+            let router = axum::Router::new()
+                .route("/resource", axum::routing::get(handler))
+                .with_state(value.to_string());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind an ephemeral localhost port");
+            let addr = listener.local_addr().expect("read the bound address");
+            tokio::spawn(async move {
+                axum::serve(listener, router).await.expect("mock server");
+            });
+            format!("http://{addr}/resource")
+        }
+
+        let client = X402Client::new(Duration::from_secs(5)).expect("client");
+        let signer = TestSigner::from_seed([0x55; 32]);
+
+        // Not base64 at all.
+        let url = spawn_with_header("!!!not-base64!!!").await;
+        let result = client.get_with_payment(&url, &signer, NETWORK, 1_000).await;
+        assert!(
+            matches!(result, Err(X402Error::InvalidPaymentRequired { .. })),
+            "expected InvalidPaymentRequired for a non-base64 header, got {result:?}"
+        );
+
+        // Valid base64, but not JSON.
+        let not_json = BASE64.encode(b"this is not json");
+        let url = spawn_with_header(&not_json).await;
+        let result = client.get_with_payment(&url, &signer, NETWORK, 1_000).await;
+        assert!(
+            matches!(result, Err(X402Error::InvalidPaymentRequired { .. })),
+            "expected InvalidPaymentRequired for a non-JSON header, got {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_when_no_accepts_entry_matches_the_scheme() {
+        let mut required = payment_required("stellar:testnet");
+        required.accepts[0].scheme = "upfront".to_string();
+        let resource = MockResource::spawn(required).await;
+        let client = X402Client::new(Duration::from_secs(5)).expect("client");
+        let signer = TestSigner::from_seed([0x55; 32]);
+
+        let result = client
+            .get_with_payment(&resource.url, &signer, NETWORK, 1_000)
+            .await;
+
+        assert!(
+            matches!(result, Err(X402Error::NoAcceptablePaymentRequirements)),
+            "expected NoAcceptablePaymentRequirements, got {result:?}"
+        );
+        assert_eq!(resource.request_count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_when_no_accepts_entry_matches_the_network() {
+        let resource = MockResource::spawn(payment_required("stellar:pubnet")).await;
+        let client = X402Client::new(Duration::from_secs(5)).expect("client");
+        let signer = TestSigner::from_seed([0x55; 32]);
+
+        let result = client
+            .get_with_payment(&resource.url, &signer, NETWORK, 1_000)
+            .await;
+
+        assert!(
+            matches!(result, Err(X402Error::NoAcceptablePaymentRequirements)),
+            "expected NoAcceptablePaymentRequirements, got {result:?}"
+        );
+        assert_eq!(resource.request_count(), 1);
     }
 }
