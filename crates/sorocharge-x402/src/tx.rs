@@ -329,6 +329,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_an_envelope_with_no_operations() {
+        let params = test_params();
+        let signer = TestSigner {
+            signing_key: SigningKey::from_bytes(&[0x11u8; 32]),
+            address: params.payer.clone(),
+        };
+        let unsigned = build_charge_entry(&params, CredentialKind::Legacy).unwrap();
+        let signed = sign_entry(unsigned, &signer, "Test SDF Network ; September 2015").unwrap();
+        let envelope = build_payment_transaction_envelope(&params, &signed).unwrap();
+
+        let TransactionEnvelope::Tx(v1) = envelope else {
+            unreachable!("build_payment_transaction_envelope always returns a v1 envelope")
+        };
+        // Zero operations authorizes no transfer at all, let alone a
+        // single bare SEP-41 `transfer(from, to, amount)`.
+        let mut tx = v1.tx;
+        tx.operations = VecM::default();
+        let tampered = TransactionEnvelope::Tx(TransactionV1Envelope {
+            tx,
+            signatures: v1.signatures,
+        });
+
+        let result = parse_payment_transaction(&tampered);
+        assert!(matches!(
+            result,
+            Err(X402Error::UnexpectedTransactionShape { .. })
+        ));
+    }
+
+    #[test]
     fn parse_rejects_delegated_credentials() {
         let params = test_params();
         let delegate: Address = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJ3XHA"

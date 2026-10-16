@@ -318,6 +318,76 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_a_payment_required_header_that_does_not_decode() {
+        async fn handler(
+            axum::extract::State(value): axum::extract::State<String>,
+        ) -> axum::response::Response {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                super::PAYMENT_REQUIRED_HEADER,
+                axum::http::HeaderValue::from_str(&value).expect("header value"),
+            );
+            axum::response::IntoResponse::into_response((
+                axum::http::StatusCode::PAYMENT_REQUIRED,
+                headers,
+            ))
+        }
+
+        async fn spawn_with_header(value: &str) -> String {
+            let router = axum::Router::new()
+                .route("/resource", axum::routing::get(handler))
+                .with_state(value.to_string());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind an ephemeral localhost port");
+            let addr = listener.local_addr().expect("read the bound address");
+            tokio::spawn(async move {
+                axum::serve(listener, router).await.expect("mock server");
+            });
+            format!("http://{addr}/resource")
+        }
+
+        let client = X402Client::new(Duration::from_secs(5)).expect("client");
+        let signer = TestSigner::from_seed([0x55; 32]);
+
+        // Not base64 at all.
+        let url = spawn_with_header("!!!not-base64!!!").await;
+        let result = client.get_with_payment(&url, &signer, NETWORK, 1_000).await;
+        assert!(
+            matches!(result, Err(X402Error::InvalidPaymentRequired { .. })),
+            "expected InvalidPaymentRequired for a non-base64 header, got {result:?}"
+        );
+
+        // Valid base64, but not JSON.
+        let not_json = BASE64.encode(b"this is not json");
+        let url = spawn_with_header(&not_json).await;
+        let result = client.get_with_payment(&url, &signer, NETWORK, 1_000).await;
+        assert!(
+            matches!(result, Err(X402Error::InvalidPaymentRequired { .. })),
+            "expected InvalidPaymentRequired for a non-JSON header, got {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_when_no_accepts_entry_matches_the_scheme() {
+        let mut required = payment_required("stellar:testnet");
+        required.accepts[0].scheme = "upfront".to_string();
+        let resource = MockResource::spawn(required).await;
+        let client = X402Client::new(Duration::from_secs(5)).expect("client");
+        let signer = TestSigner::from_seed([0x55; 32]);
+
+        let result = client
+            .get_with_payment(&resource.url, &signer, NETWORK, 1_000)
+            .await;
+
+        assert!(
+            matches!(result, Err(X402Error::NoAcceptablePaymentRequirements)),
+            "expected NoAcceptablePaymentRequirements, got {result:?}"
+        );
+        assert_eq!(resource.request_count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rejects_when_no_accepts_entry_matches_the_network() {
         let resource = MockResource::spawn(payment_required("stellar:pubnet")).await;
         let client = X402Client::new(Duration::from_secs(5)).expect("client");

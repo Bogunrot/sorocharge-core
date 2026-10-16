@@ -534,6 +534,45 @@ mod tests {
         )]
     }
 
+    /// The submitted transaction's XDR must decode: garbage base64 (and
+    /// valid base64 that is not XDR) surfaces as `XdrDecodingFailed`, not
+    /// any other variant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_a_payment_transaction_whose_xdr_does_not_decode() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+        let facilitator_signer = TestSigner::from_seed([0x22; 32]);
+        let payer = TestSigner::from_seed([0x33; 32]);
+        let params = charge_params(&payer.address());
+
+        let rpc = MockRpc::spawn(CURRENT_LEDGER, ACCOUNT_SEQ_NUM, 100, events_for(&params)).await;
+        let rpc_client = stellar_rpc_client::Client::new(&rpc.url).expect("rpc client");
+        let facilitator = Facilitator::new(
+            &rpc_client,
+            &facilitator_signer,
+            NETWORK.to_string(),
+            FacilitatorConfig::default(),
+        );
+
+        // Not base64 at all.
+        let mut request = request_for(&params, &payer);
+        request.payment_payload.payload.transaction = "!!!not-valid-base64!!!".to_string();
+        let result = facilitator.validate(&request).await;
+        assert!(
+            matches!(result, Err(X402Error::XdrDecodingFailed { .. })),
+            "expected XdrDecodingFailed for a non-base64 transaction, got {result:?}"
+        );
+
+        // Valid base64, but not a TransactionEnvelope.
+        let mut request = request_for(&params, &payer);
+        request.payment_payload.payload.transaction = BASE64.encode(b"this is not XDR");
+        let result = facilitator.validate(&request).await;
+        assert!(
+            matches!(result, Err(X402Error::XdrDecodingFailed { .. })),
+            "expected XdrDecodingFailed for non-XDR bytes, got {result:?}"
+        );
+    }
+
     /// The facilitator must refuse any payment whose transfer `from` is its
     /// own fee-sponsoring address — the trick that would make it move its own
     /// funds.
