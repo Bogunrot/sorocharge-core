@@ -96,7 +96,11 @@ pub(crate) fn build_payment_transaction_envelope(
 
 /// The `(contract, from, to, amount)` a SEP-41 `transfer` invocation
 /// authorizes.
-pub(crate) struct TransferArgs {
+///
+/// `pub` only so the `fuzzing`-gated re-export in `lib.rs` can name it; the
+/// enclosing `tx` module is private, so this is not part of the crate's
+/// normal public surface.
+pub struct TransferArgs {
     pub asset_contract: Address,
     pub from: Address,
     pub to: Address,
@@ -117,7 +121,7 @@ pub(crate) struct TransferArgs {
 /// — the spec explicitly forbids both for this scheme, even though
 /// `sorocharge-signer` itself can build/verify one of them (`Delegated`)
 /// for other protocols.
-pub(crate) fn parse_payment_transaction(
+pub fn parse_payment_transaction(
     envelope: &TransactionEnvelope,
 ) -> Result<(TransferArgs, Transaction, SorobanAuthorizationEntry), X402Error> {
     let TransactionEnvelope::Tx(TransactionV1Envelope { tx, .. }) = envelope else {
@@ -325,6 +329,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_an_envelope_with_no_operations() {
+        let params = test_params();
+        let signer = TestSigner {
+            signing_key: SigningKey::from_bytes(&[0x11u8; 32]),
+            address: params.payer.clone(),
+        };
+        let unsigned = build_charge_entry(&params, CredentialKind::Legacy).unwrap();
+        let signed = sign_entry(unsigned, &signer, "Test SDF Network ; September 2015").unwrap();
+        let envelope = build_payment_transaction_envelope(&params, &signed).unwrap();
+
+        let TransactionEnvelope::Tx(v1) = envelope else {
+            unreachable!("build_payment_transaction_envelope always returns a v1 envelope")
+        };
+        // Zero operations authorizes no transfer at all, let alone a
+        // single bare SEP-41 `transfer(from, to, amount)`.
+        let mut tx = v1.tx;
+        tx.operations = VecM::default();
+        let tampered = TransactionEnvelope::Tx(TransactionV1Envelope {
+            tx,
+            signatures: v1.signatures,
+        });
+
+        let result = parse_payment_transaction(&tampered);
+        assert!(matches!(
+            result,
+            Err(X402Error::UnexpectedTransactionShape { .. })
+        ));
+    }
+
+    #[test]
     fn parse_rejects_delegated_credentials() {
         let params = test_params();
         let delegate: Address = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJ3XHA"
@@ -381,5 +415,100 @@ mod tests {
             result,
             Err(X402Error::UnexpectedTransactionShape { .. })
         ));
+    }
+
+    /// A `Signer` whose key fails must surface as exactly `Signing`, so a
+    /// caller can tell a key failure apart from every other `X402Error`.
+    #[test]
+    fn sign_transaction_propagates_signer_failures_as_signing() {
+        struct FailingSigner {
+            address: Address,
+        }
+
+        impl Signer for FailingSigner {
+            fn sign_preimage(
+                &self,
+                _preimage: &[u8],
+            ) -> Result<[u8; 64], sorocharge_signer::SorochargeError> {
+                Err(sorocharge_signer::SorochargeError::SigningFailed {
+                    reason: "boom".to_string(),
+                })
+            }
+
+            fn address(&self) -> Address {
+                self.address.clone()
+            }
+        }
+
+        let params = test_params();
+        let good = TestSigner {
+            signing_key: SigningKey::from_bytes(&[0x11u8; 32]),
+            address: params.payer.clone(),
+        };
+        let unsigned = build_charge_entry(&params, CredentialKind::Legacy).unwrap();
+        let signed = sign_entry(unsigned, &good, "Test SDF Network ; September 2015").unwrap();
+        let envelope = build_payment_transaction_envelope(&params, &signed).unwrap();
+        let TransactionEnvelope::Tx(v1) = envelope else {
+            unreachable!("build_payment_transaction_envelope always returns a v1 envelope")
+        };
+
+        let failing = FailingSigner {
+            address: params.payer.clone(),
+        };
+        match sign_transaction(v1.tx, &failing, [0u8; 32]) {
+            Err(X402Error::Signing(_)) => {}
+            other => panic!("expected Signing, got {other:?}"),
+        }
+    }
+
+    /// A signer whose address is not an Ed25519 account cannot become a
+    /// transaction source, so `sign_transaction` must fail as exactly
+    /// `XdrEncodingFailed` — a value that does not fit its XDR-constrained
+    /// shape, not a signing or shape error.
+    #[test]
+    fn sign_transaction_rejects_a_non_account_signer_as_xdr_encoding_failed() {
+        use stellar_xdr::ContractId;
+
+        struct ContractSigner {
+            address: Address,
+        }
+
+        impl Signer for ContractSigner {
+            fn sign_preimage(
+                &self,
+                _preimage: &[u8],
+            ) -> Result<[u8; 64], sorocharge_signer::SorochargeError> {
+                Ok([0u8; 64])
+            }
+
+            fn address(&self) -> Address {
+                self.address.clone()
+            }
+        }
+
+        let params = test_params();
+        let good = TestSigner {
+            signing_key: SigningKey::from_bytes(&[0x11u8; 32]),
+            address: params.payer.clone(),
+        };
+        let unsigned = build_charge_entry(&params, CredentialKind::Legacy).unwrap();
+        let signed = sign_entry(unsigned, &good, "Test SDF Network ; September 2015").unwrap();
+        let envelope = build_payment_transaction_envelope(&params, &signed).unwrap();
+        let TransactionEnvelope::Tx(v1) = envelope else {
+            unreachable!("build_payment_transaction_envelope always returns a v1 envelope")
+        };
+
+        let contract_signer = ContractSigner {
+            address: ScAddress::Contract(ContractId(stellar_xdr::Hash([0xabu8; 32]))),
+        };
+        match sign_transaction(v1.tx, &contract_signer, [0u8; 32]) {
+            Err(X402Error::XdrEncodingFailed { reason }) => {
+                assert!(
+                    reason.contains("Ed25519 account"),
+                    "expected the facilitator-signer reason, got {reason:?}"
+                );
+            }
+            other => panic!("expected XdrEncodingFailed, got {other:?}"),
+        }
     }
 }
