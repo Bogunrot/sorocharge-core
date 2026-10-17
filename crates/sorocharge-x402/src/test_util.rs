@@ -236,10 +236,14 @@ async fn handle_rpc(
         .expect("failing lock")
         .as_deref()
         == Some(method.as_str());
-    let result = match method.as_str() {
-        _ if failing => json!({
+    if failing {
+        return Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
             "error": { "code": -32000, "message": format!("mock RPC forced {method} failure") }
-        }),
+        }));
+    }
+    let result = match method.as_str() {
         "getLatestLedger" => json!({
             "id": "mock-ledger",
             "protocolVersion": 28,
