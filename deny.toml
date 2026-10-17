@@ -14,4 +14,7 @@ allow = [
   "BSD-4-Clause",
   "Unlicense",
   "ISC",
+  # Pulled in transitively by the ICU crates and the TLS root-certificate data.
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
 ]
