@@ -50,6 +50,9 @@ pub enum SorochargeError {
     /// A signer's address matches no credential node (top-level address or
     /// delegate) in the entry being signed.
     NoMatchingCredentialNode,
+    /// The network passphrase does not match any known Stellar network
+    /// (currently only `stellar:pubnet` / `stellar:testnet`).
+    UnsupportedNetwork { network: String },
     /// A simulation's events could not be decoded, or a balance event lacks
     /// the topics or data a transfer must carry.
     SimulationEventsMalformed { reason: String },
@@ -115,6 +118,7 @@ impl fmt::Display for SorochargeError {
                 f,
                 "signer's address matches no credential node in this entry"
             ),
+            Self::UnsupportedNetwork { network } => write!(f, "unsupported network: {network}"),
             Self::SigningFailed { reason } => write!(f, "signing failed: {reason}"),
             Self::XdrEncodingFailed { reason } => write!(f, "XDR encoding failed: {reason}"),
         }
