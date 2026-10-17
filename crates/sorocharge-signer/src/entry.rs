@@ -47,6 +47,35 @@ pub fn parse_address(strkey: &str) -> Result<Address, SorochargeError> {
 /// signature exactly, and `valid_until_ledger` is a ledger number (never
 /// wall-clock time) because that is what Soroban authorization expiry
 /// actually checks on-chain.
+///
+/// # Examples
+///
+/// ```rust
+/// use sorocharge_signer::ChargeParams;
+/// use stellar_xdr::ScAddress;
+///
+/// let asset_contract: ScAddress = "CAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGGJH"
+///     .parse()
+///     .expect("valid contract address");
+/// let payer: ScAddress = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7"
+///     .parse()
+///     .expect("valid payer address");
+/// let recipient: ScAddress = "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N"
+///     .parse()
+///     .expect("valid recipient address");
+///
+/// let params = ChargeParams {
+///     asset_contract,
+///     amount: 1_000_000,
+///     payer,
+///     recipient,
+///     valid_until_ledger: 123_456,
+/// };
+///
+/// assert_eq!(params.amount, 1_000_000);
+/// assert_eq!(params.recipient.to_string(), "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N");
+/// assert_eq!(params.valid_until_ledger, 123_456);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChargeParams {
     /// The SEP-41 Stellar Asset Contract (SAC) address being transferred.
@@ -69,6 +98,29 @@ pub struct ChargeParams {
 /// verify and so is out of scope for a payment-authorization library: every
 /// charge here is authorized by an explicit `Address`, never implicitly by
 /// the transaction's source account.
+///
+/// # Examples
+///
+/// ```rust
+/// use sorocharge_signer::CredentialKind;
+/// use stellar_xdr::ScAddress;
+///
+/// let signer_a: ScAddress = "GDIEVMRSOQV3JKZ2CNUL2RQV4TTNAISKW4NAC25PQUQKGMWJO6DTOAE7"
+///     .parse()
+///     .expect("valid signer address");
+/// let signer_b: ScAddress = "GCQJVJPUPJTVTABP7FK7RXBNFIKKLSM5EO7JP6DECJ77SOBUKWSPB64N"
+///     .parse()
+///     .expect("valid signer address");
+///
+/// let credential = CredentialKind::Delegated {
+///     signers: vec![signer_a, signer_b],
+/// };
+///
+/// match credential {
+///     CredentialKind::Delegated { signers } => assert_eq!(signers.len(), 2),
+///     _ => panic!("expected delegated signers"),
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialKind {
     /// `SOROBAN_CREDENTIALS_ADDRESS`: a single ed25519 signature over the

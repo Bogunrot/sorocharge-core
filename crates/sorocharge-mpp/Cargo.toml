@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "MPP draft-stellar-charge-00 wire-format adapter for sorocharge-signer: prepare/sign/send as a client, verify/submit/poll as a server"
+keywords = ["mpp", "stellar", "soroban", "payments", "protocol"]
+categories = ["web-programming", "network-programming", "finance", "authentication"]
 
 [dependencies]
 sorocharge-signer = { path = "../sorocharge-signer" }
