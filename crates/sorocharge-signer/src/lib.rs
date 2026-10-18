@@ -20,34 +20,15 @@
 mod effects;
 mod entry;
 mod error;
+mod network;
 mod sign;
 mod verify;
-
-/// The network passphrase for mainnet — shared by the signing engine and
-/// protocol adapters when they translate Stellar passphrases into CAIP-2
-/// identifiers.
-pub const PUBNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
-/// The network passphrase for testnet — shared by the signing engine and
-/// protocol adapters when they translate Stellar passphrases into CAIP-2
-/// identifiers.
-pub const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
-
-/// Maps a Stellar network passphrase to the CAIP-2 identifier the protocol
-/// adapters expect in their HTTP challenge payloads.
-pub fn caip2_for_passphrase(network_passphrase: &str) -> Result<&'static str, SorochargeError> {
-    match network_passphrase {
-        PUBNET_PASSPHRASE => Ok("stellar:pubnet"),
-        TESTNET_PASSPHRASE => Ok("stellar:testnet"),
-        other => Err(SorochargeError::UnsupportedNetwork {
-            network: other.to_string(),
-        }),
-    }
-}
 
 pub use effects::verify_transfer_effects;
 pub use entry::{
     build_charge_entry, parse_address, Address, ChargeParams, CredentialKind, UnsignedEntry,
 };
 pub use error::SorochargeError;
+pub use network::caip2_for_passphrase;
 pub use sign::{network_id_hash, sign_entry, SignedEntry, Signer};
 pub use verify::{verify_delegated_threshold, verify_entry};
